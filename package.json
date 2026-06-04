@@ -13,5 +13,11 @@
   },
   "devDependencies": {
     "netlify-cli": "^17.38.1"
+  },
+  "allowScripts": {
+    "netlify-cli@17.38.1": true,
+    "esbuild@0.19.11": true,
+    "esbuild@0.21.2": true,
+    "sharp@0.32.6": true
   }
 }
