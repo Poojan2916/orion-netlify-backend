@@ -1,0 +1,17 @@
+{
+  "name": "orion-quotation-netlify-google",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Netlify Functions backend for Orion Quotation Generator Google Workspace integration.",
+  "scripts": {
+    "dev:functions": "netlify dev",
+    "test:status": "node -e \"console.log('Run with Netlify Dev or deploy to Netlify')\""
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^17.38.1"
+  }
+}
