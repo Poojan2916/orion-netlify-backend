@@ -8,5 +8,5 @@
     "dev": "netlify dev",
     "build": "echo 'No build required'"
   },
-  "dependencies": {}
+  "dependencies": {"postgres": "^3.4.5"}
 }
