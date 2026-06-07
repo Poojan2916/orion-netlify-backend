@@ -1,35 +1,61 @@
-"use strict";
-const z = require("./_zoho");
+const postgres = require("postgres");
 
-const DATA_FILE = "orion-quotations-data.json";
+const sql = postgres(process.env.NETLIFY_DB_URL, {
+  ssl: "require",
+});
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || "*",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
 
 exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") return z.options();
-  if (event.httpMethod !== "POST") return z.json(405, { error: "Method not allowed" });
-  try {
-    z.requireEnv(["ZOHO_WORKDRIVE_DATA_FOLDER_ID"]);
-    const body = JSON.parse(event.body || "{}");
-    const payload = {
-      savedAt: new Date().toISOString(),
-      quotes: Array.isArray(body.quotes) ? body.quotes : [],
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers: corsHeaders, body: "" };
+  }
+
+  if (event.httpMethod !== "POST") {
+    return {
+      statusCode: 405,
+      headers: corsHeaders,
+      body: JSON.stringify({ error: "Method not allowed" }),
     };
-    const buffer = Buffer.from(JSON.stringify(payload, null, 2), "utf8");
-    const uploaded = await z.uploadWorkDriveBuffer({
-      folderId: process.env.ZOHO_WORKDRIVE_DATA_FOLDER_ID,
-      fileName: DATA_FILE,
-      buffer,
-      mimeType: "application/json",
-      override: true,
-    });
-    return z.json(200, {
-      saved: true,
-      fileName: DATA_FILE,
-      fileId: uploaded.id,
-      link: uploaded.link,
-      savedAt: payload.savedAt,
-      raw: uploaded.raw,
-    });
-  } catch (e) {
-    return z.json(e.statusCode || 500, z.safeError(e));
+  }
+
+  try {
+    const body = JSON.parse(event.body || "{}");
+    const quotes = Array.isArray(body.quotes) ? body.quotes : [];
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS quotation_state (
+        id TEXT PRIMARY KEY,
+        data JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO quotation_state (id, data, updated_at)
+      VALUES ('main', ${sql.json(quotes)}, NOW())
+      ON CONFLICT (id)
+      DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `;
+
+    return {
+      statusCode: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ok: true,
+        count: quotes.length,
+        savedAt: new Date().toISOString(),
+      }),
+    };
+  } catch (error) {
+    return {
+      statusCode: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ error: error.message }),
+    };
   }
 };
