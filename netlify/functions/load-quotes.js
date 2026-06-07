@@ -1,9 +1,10 @@
-const postgres = require("postgres");
 
-const sql = postgres(process.env.NETLIFY_DB_URL, {
+const postgres = require("postgres");
+const { getConnectionString } = require("@netlify/database");
+
+const sql = postgres(getConnectionString(), {
   ssl: "require",
 });
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || "*",
   "Access-Control-Allow-Headers": "Content-Type",
