@@ -1,7 +1,15 @@
 const postgres = require("postgres");
-const { getConnectionString } = require("@netlify/database");
 
-const sql = postgres(getConnectionString(), {
+const connectionString =
+  process.env.DATABASE_URL ||
+  process.env.NETLIFY_DB_URL ||
+  process.env.POSTGRES_URL;
+
+if (!connectionString) {
+  throw new Error("Missing DATABASE_URL for Netlify Database connection. Add the Read and write connection string as DATABASE_URL in Netlify environment variables.");
+}
+
+const sql = postgres(connectionString, {
   ssl: "require",
 });
 
@@ -19,7 +27,7 @@ exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
-      headers: corsHeaders,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
       body: JSON.stringify({ error: "Method not allowed" }),
     };
   }
