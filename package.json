@@ -1,23 +1,12 @@
 {
-  "name": "orion-quotation-netlify-google",
+  "name": "orion-zoho-backend",
   "version": "1.0.0",
   "private": true,
+  "description": "Zoho Mail + Zoho WorkDrive backend for Orion quotation generator on Netlify Functions.",
   "type": "commonjs",
-  "description": "Netlify Functions backend for Orion Quotation Generator Google Workspace integration.",
   "scripts": {
-    "dev:functions": "netlify dev",
-    "test:status": "node -e \"console.log('Run with Netlify Dev or deploy to Netlify')\""
+    "dev": "netlify dev",
+    "build": "echo 'No build required'"
   },
-  "dependencies": {
-    "googleapis": "^144.0.0"
-  },
-  "devDependencies": {
-    "netlify-cli": "^17.38.1"
-  },
-  "allowScripts": {
-    "netlify-cli@17.38.1": true,
-    "esbuild@0.19.11": true,
-    "esbuild@0.21.2": true,
-    "sharp@0.32.6": true
-  }
+  "dependencies": {}
 }

@@ -1,57 +1,42 @@
 "use strict";
-
-const g = require("./_google");
+const z = require("./_zoho");
 
 exports.handler = async (event) => {
-  const options = g.handleOptions(event);
-  if (options) return options;
-
-  if (event.httpMethod !== "POST") {
-    return g.json(405, { error: "Method not allowed. Use POST." });
-  }
-
+  if (event.httpMethod === "OPTIONS") return z.options();
+  if (event.httpMethod !== "POST") return z.json(405, { error: "Method not allowed" });
   try {
-    const auth = g.authorized();
-    const body = g.parseJsonBody(event);
-    const {
-      externalFileName,
-      internalFileName,
-      externalPdfBase64,
-      internalPdfBase64,
-    } = body;
-
+    z.requireEnv(["ZOHO_WORKDRIVE_EXTERNAL_FOLDER_ID", "ZOHO_WORKDRIVE_INTERNAL_FOLDER_ID"]);
+    const body = JSON.parse(event.body || "{}");
+    const { externalFileName, internalFileName, externalPdfBase64, internalPdfBase64 } = body;
     if (!externalPdfBase64 || !internalPdfBase64) {
-      return g.json(400, { error: "Both PDF payloads are required." });
+      return z.json(400, { error: "Both PDF payloads are required." });
     }
 
-    const { drive, externalId, internalId } = await g.ensureFolderTree(auth);
+    const external = await z.uploadWorkDriveBase64({
+      folderId: process.env.ZOHO_WORKDRIVE_EXTERNAL_FOLDER_ID,
+      fileName: externalFileName || "Customer_Copy_External.pdf",
+      base64: externalPdfBase64,
+      mimeType: "application/pdf",
+      override: false,
+    });
+    const internal = await z.uploadWorkDriveBase64({
+      folderId: process.env.ZOHO_WORKDRIVE_INTERNAL_FOLDER_ID,
+      fileName: internalFileName || "Company_Copy_Internal.pdf",
+      base64: internalPdfBase64,
+      mimeType: "application/pdf",
+      override: false,
+    });
 
-    const external = await g.uploadPdf(
-      drive,
-      externalId,
-      externalFileName || "Customer Copy - External.pdf",
-      externalPdfBase64
-    );
-
-    const internal = await g.uploadPdf(
-      drive,
-      internalId,
-      internalFileName || "Company Copy - Internal.pdf",
-      internalPdfBase64
-    );
-
-    return g.json(200, {
+    return z.json(200, {
       externalDriveLink: external.link,
       internalDriveLink: internal.link,
       externalFileId: external.id,
       internalFileId: internal.id,
+      externalRaw: external.raw,
+      internalRaw: internal.raw,
       savedAt: new Date().toISOString(),
     });
   } catch (e) {
-    if (e.message === "NOT_CONNECTED") {
-      return g.json(401, { error: "Not connected. Visit /.netlify/functions/auth-google first, then add GOOGLE_REFRESH_TOKEN in Netlify." });
-    }
-    console.error(e);
-    return g.json(500, { error: e.message });
+    return z.json(e.statusCode || 500, z.safeError(e));
   }
 };

@@ -1,22 +1,31 @@
 "use strict";
-
-const g = require("./_google");
+const z = require("./_zoho");
 
 exports.handler = async (event) => {
-  const options = g.handleOptions(event);
-  if (options) return options;
-
+  if (event.httpMethod === "OPTIONS") return z.options();
   const required = [
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",
-    "GOOGLE_REDIRECT_URI",
+    "ZOHO_CLIENT_ID",
+    "ZOHO_CLIENT_SECRET",
+    "ZOHO_REDIRECT_URI",
+    "ZOHO_REFRESH_TOKEN",
     "SEND_AS",
-    "GOOGLE_REFRESH_TOKEN",
+    "CORS_ORIGIN",
   ];
-  const missing = required.filter((key) => !process.env[key]);
-
-  return g.json(200, {
+  const optional = [
+    "ZOHO_MAIL_ACCOUNT_ID",
+    "ZOHO_WORKDRIVE_EXTERNAL_FOLDER_ID",
+    "ZOHO_WORKDRIVE_INTERNAL_FOLDER_ID",
+    "ZOHO_WORKDRIVE_DATA_FOLDER_ID",
+  ];
+  const missing = required.filter((k) => !process.env[k]);
+  return z.json(200, {
     connected: missing.length === 0,
     missing,
+    optionalMissing: optional.filter((k) => !process.env[k]),
+    accountsUrl: z.accountsUrl(),
+    apiDomain: z.apiDomain(),
+    mailBase: z.mailBase(),
+    redirectUri: z.redirectUri(),
+    scopes: z.SCOPES,
   });
 };
