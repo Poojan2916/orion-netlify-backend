@@ -3,6 +3,43 @@
 // Shared Zoho helpers for Netlify Functions.
 // Region: India by default (.in). Override the *_BASE env vars only if needed.
 
+
+// Cache the short-lived access token inside the warm Netlify function runtime.
+// This reduces calls to Zoho's /oauth/v2/token endpoint and prevents rate-limit errors.
+let cachedAccessToken = null;
+let cachedAccessTokenExpiresAt = 0;
+const TOKEN_SAFETY_WINDOW_MS = 60 * 1000;
+
+function cleanRefreshToken(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^ZOHO_REFRESH_TOKEN\s*=\s*/i, "")
+    .replace(/^['"]|['"]$/g, "");
+}
+
+
+function normalizeBaseUrl(value, fallback) {
+  return String(value || fallback || "")
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/\/+$/, "")
+    .replace(/\/api$/i, "");
+}
+
+function safeFileName(name, fallback = "Orion_Quotation.pdf", maxBase = 80) {
+  let raw = String(name || fallback).trim().replace(/^['"]|['"]$/g, "");
+  raw = raw.split(/[\\/]/).pop() || fallback;
+  raw = raw.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/_+/g, "_");
+  if (!raw || raw === ".") raw = fallback;
+
+  const m = raw.match(/^(.*?)(\.[A-Za-z0-9]{1,8})$/);
+  const ext = m ? m[2] : ".pdf";
+  let base = m ? m[1] : raw;
+  base = base.replace(/^\.+|\.+$/g, "") || "Orion_Quotation";
+  if (base.length > maxBase) base = base.slice(0, maxBase);
+  return base + ext.toLowerCase();
+}
+
 const SCOPES = [
   "ZohoMail.messages.CREATE",
   "ZohoMail.accounts.READ",
@@ -62,15 +99,17 @@ function requireEnv(names) {
 }
 
 function accountsUrl() {
-  return env("ZOHO_ACCOUNTS_URL", "https://accounts.zoho.in").replace(/\/$/, "");
+  return normalizeBaseUrl(env("ZOHO_ACCOUNTS_URL"), "https://accounts.zoho.in");
 }
 
 function apiDomain() {
-  return env("ZOHO_API_DOMAIN", "https://www.zohoapis.in").replace(/\/$/, "");
+  return normalizeBaseUrl(env("ZOHO_API_DOMAIN"), "https://www.zohoapis.in");
 }
 
 function mailBase() {
-  return env("ZOHO_MAIL_API_BASE", "https://mail.zoho.in").replace(/\/$/, "");
+  // Accept both "https://mail.zoho.in" and a mistaken "https://mail.zoho.in/api".
+  // The helper removes a trailing /api so function code can safely append /api/...
+  return normalizeBaseUrl(env("ZOHO_MAIL_API_BASE"), "https://mail.zoho.in");
 }
 
 function redirectUri() {
@@ -113,8 +152,15 @@ async function exchangeCode(code) {
 
 async function accessToken() {
   requireEnv(["ZOHO_CLIENT_ID", "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN"]);
+
+  const now = Date.now();
+  if (cachedAccessToken && cachedAccessTokenExpiresAt - TOKEN_SAFETY_WINDOW_MS > now) {
+    return cachedAccessToken;
+  }
+
+  const refreshToken = cleanRefreshToken(process.env.ZOHO_REFRESH_TOKEN);
   const u = new URL(`${accountsUrl()}/oauth/v2/token`);
-  u.searchParams.set("refresh_token", process.env.ZOHO_REFRESH_TOKEN);
+  u.searchParams.set("refresh_token", refreshToken);
   u.searchParams.set("client_id", process.env.ZOHO_CLIENT_ID);
   u.searchParams.set("client_secret", process.env.ZOHO_CLIENT_SECRET);
   u.searchParams.set("grant_type", "refresh_token");
@@ -124,12 +170,20 @@ async function accessToken() {
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (!res.ok || data.error) {
-    const err = new Error(`Zoho refresh failed: ${data.error || res.status} ${data.error_description || text}`);
-    err.statusCode = 401;
+    const lower = text.toLowerCase();
+    const isRateLimit = lower.includes("too many requests") || lower.includes("access denied");
+    const message = isRateLimit
+      ? "Zoho refresh rate limit reached. Stop testing for 30-60 minutes, then retry. The code now caches access tokens to reduce refresh requests."
+      : `Zoho refresh failed: ${data.error || res.status} ${data.error_description || text}`;
+    const err = new Error(message);
+    err.statusCode = isRateLimit ? 429 : 401;
     err.details = data;
     throw err;
   }
-  return data.access_token;
+
+  cachedAccessToken = data.access_token;
+  cachedAccessTokenExpiresAt = now + ((Number(data.expires_in) || 3600) * 1000);
+  return cachedAccessToken;
 }
 
 function authHeader(token) {
@@ -191,22 +245,57 @@ async function getMailAccountId() {
 async function uploadMailAttachment({ accountId, fileName, base64, mimeType = "application/pdf" }) {
   const token = await accessToken();
   const buffer = Buffer.from(base64, "base64");
-  const u = new URL(`${mailBase()}/api/accounts/${accountId}/messages/attachments`);
-  u.searchParams.set("fileName", fileName);
-  u.searchParams.set("isInline", "false");
+  const finalName = safeFileName(fileName, "Orion_Quotation.pdf", 80);
 
-  const res = await fetch(u.toString(), {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": mimeType,
-      ...authHeader(token),
-    },
-    body: buffer,
-  });
-  const text = await res.text();
+  async function uploadRaw() {
+    const u = new URL(`${mailBase()}/api/accounts/${accountId}/messages/attachments`);
+    u.searchParams.set("fileName", finalName);
+    u.searchParams.set("isInline", "false");
+
+    const res = await fetch(u.toString(), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": mimeType,
+        ...authHeader(token),
+      },
+      body: buffer,
+    });
+    return res;
+  }
+
+  async function uploadMultipart() {
+    const u = new URL(`${mailBase()}/api/accounts/${accountId}/messages/attachments`);
+    u.searchParams.set("uploadType", "multipart");
+    u.searchParams.set("isInline", "false");
+    const form = new FormData();
+    form.append("attach", new Blob([buffer], { type: mimeType }), finalName);
+
+    const res = await fetch(u.toString(), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        ...authHeader(token),
+      },
+      body: form,
+    });
+    return res;
+  }
+
+  // Zoho supports both raw upload and multipart upload for attachments. Try raw first;
+  // if the account/DC rejects the route with URL_RULE/UPLOAD_RULE, retry multipart.
+  let res = await uploadRaw();
+  let text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+  const code = data?.data?.errorCode || data?.errorCode || "";
+  if (!res.ok && (String(code).includes("URL_RULE") || String(code).includes("UPLOAD_RULE"))) {
+    res = await uploadMultipart();
+    text = await res.text();
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  }
+
   if (!res.ok) {
     const err = new Error(`Zoho Mail attachment upload failed ${res.status}: ${text}`);
     err.statusCode = res.status;
@@ -244,13 +333,8 @@ async function sendCustomerEmail({ to, subject, body, fileName, base64 }) {
   return { accountId, result };
 }
 
-function workdriveUploadUrl({ fileName, folderId, mimeType, override = true }) {
-  const u = new URL(`${apiDomain()}/workdrive/api/v1/upload`);
-  u.searchParams.set("filename", fileName);
-  u.searchParams.set("parent_id", folderId);
-  u.searchParams.set("override-name-exist", override ? "true" : "false");
-  u.searchParams.set("type", mimeType);
-  return u.toString();
+function workdriveUploadEndpoint() {
+  return `${apiDomain()}/workdrive/api/v1/upload`;
 }
 
 function extractWorkDriveFileInfo(data) {
@@ -269,11 +353,17 @@ function extractWorkDriveFileInfo(data) {
 async function uploadWorkDriveBuffer({ folderId, fileName, buffer, mimeType = "application/pdf", override = true }) {
   if (!folderId) throw new Error("Missing WorkDrive folder ID.");
   const token = await accessToken();
-  const form = new FormData();
-  const blob = new Blob([buffer], { type: mimeType });
-  form.append("content", blob, fileName);
+  const finalName = safeFileName(fileName, "Orion_Quotation.pdf", 80);
 
-  const res = await fetch(workdriveUploadUrl({ fileName, folderId, mimeType, override }), {
+  const form = new FormData();
+  // Zoho WorkDrive upload expects filename, parent_id, override-name-exist, and content
+  // as multipart form fields. Putting long values in the query string can trigger F6005.
+  form.append("filename", finalName);
+  form.append("parent_id", String(folderId).trim());
+  form.append("override-name-exist", override ? "true" : "false");
+  form.append("content", new Blob([buffer], { type: mimeType }), finalName);
+
+  const res = await fetch(workdriveUploadEndpoint(), {
     method: "POST",
     headers: {
       Accept: "application/vnd.api+json",
@@ -374,4 +464,5 @@ module.exports = {
   findWorkDriveFileByName,
   downloadWorkDriveFile,
   safeError,
+  safeFileName,
 };
