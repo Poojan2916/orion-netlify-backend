@@ -39,6 +39,26 @@ function safeFileName(name, fallback = "Orion_Quotation.pdf", maxBase = 80) {
   if (base.length > maxBase) base = base.slice(0, maxBase);
   return base + ext.toLowerCase();
 }
+function cleanWorkDriveFolderId(value) {
+  let v = String(value || "").trim().replace(/^['"]|['"]$/g, "");
+  // If the user pasted a full WorkDrive folder URL, extract only the folder ID.
+  const folderMatch = v.match(/\/folders\/([^/?#]+)/i);
+  if (folderMatch) v = folderMatch[1];
+  // Some WorkDrive URLs end with the folder/resource ID as the last path segment.
+  if (/^https?:\/\//i.test(v)) {
+    try {
+      const u = new URL(v);
+      const parts = u.pathname.split("/").filter(Boolean);
+      v = parts[parts.length - 1] || v;
+    } catch { /* ignore */ }
+  }
+  v = v.trim();
+  if (v.length > 120) {
+    throw new Error("WorkDrive folder ID looks too long. Paste only the folder ID from the WorkDrive URL, not the full URL.");
+  }
+  return v;
+}
+
 
 const SCOPES = [
   "ZohoMail.messages.CREATE",
@@ -247,54 +267,28 @@ async function uploadMailAttachment({ accountId, fileName, base64, mimeType = "a
   const buffer = Buffer.from(base64, "base64");
   const finalName = safeFileName(fileName, "Orion_Quotation.pdf", 80);
 
-  async function uploadRaw() {
-    const u = new URL(`${mailBase()}/api/accounts/${accountId}/messages/attachments`);
-    u.searchParams.set("fileName", finalName);
-    u.searchParams.set("isInline", "false");
+  // Zoho Mail reliably accepts attachment uploads as multipart/form-data.
+  // Do NOT set Content-Type manually; Node/undici adds the required multipart boundary.
+  // Official endpoint: /api/accounts/{accountId}/messages/attachments?uploadType=multipart&isInline=false
+  const u = new URL(`${mailBase()}/api/accounts/${accountId}/messages/attachments`);
+  u.searchParams.set("uploadType", "multipart");
+  u.searchParams.set("isInline", "false");
 
-    const res = await fetch(u.toString(), {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": mimeType,
-        ...authHeader(token),
-      },
-      body: buffer,
-    });
-    return res;
-  }
+  const form = new FormData();
+  form.append("attach", new Blob([buffer], { type: mimeType }), finalName);
 
-  async function uploadMultipart() {
-    const u = new URL(`${mailBase()}/api/accounts/${accountId}/messages/attachments`);
-    u.searchParams.set("uploadType", "multipart");
-    u.searchParams.set("isInline", "false");
-    const form = new FormData();
-    form.append("attach", new Blob([buffer], { type: mimeType }), finalName);
+  const res = await fetch(u.toString(), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      ...authHeader(token),
+    },
+    body: form,
+  });
 
-    const res = await fetch(u.toString(), {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        ...authHeader(token),
-      },
-      body: form,
-    });
-    return res;
-  }
-
-  // Zoho supports both raw upload and multipart upload for attachments. Try raw first;
-  // if the account/DC rejects the route with URL_RULE/UPLOAD_RULE, retry multipart.
-  let res = await uploadRaw();
-  let text = await res.text();
+  const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-  const code = data?.data?.errorCode || data?.errorCode || "";
-  if (!res.ok && (String(code).includes("URL_RULE") || String(code).includes("UPLOAD_RULE"))) {
-    res = await uploadMultipart();
-    text = await res.text();
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  }
 
   if (!res.ok) {
     const err = new Error(`Zoho Mail attachment upload failed ${res.status}: ${text}`);
@@ -302,6 +296,7 @@ async function uploadMailAttachment({ accountId, fileName, base64, mimeType = "a
     err.details = data;
     throw err;
   }
+
   const attachment = Array.isArray(data?.data) ? data.data[0] : data?.data || data;
   if (!attachment?.storeName || !attachment?.attachmentName || !attachment?.attachmentPath) {
     const err = new Error("Zoho Mail did not return attachment metadata. Check the response in function logs.");
@@ -354,12 +349,13 @@ async function uploadWorkDriveBuffer({ folderId, fileName, buffer, mimeType = "a
   if (!folderId) throw new Error("Missing WorkDrive folder ID.");
   const token = await accessToken();
   const finalName = safeFileName(fileName, "Orion_Quotation.pdf", 80);
+  const cleanFolderId = cleanWorkDriveFolderId(folderId);
 
   const form = new FormData();
   // Zoho WorkDrive upload expects filename, parent_id, override-name-exist, and content
   // as multipart form fields. Putting long values in the query string can trigger F6005.
   form.append("filename", finalName);
-  form.append("parent_id", String(folderId).trim());
+  form.append("parent_id", cleanFolderId);
   form.append("override-name-exist", override ? "true" : "false");
   form.append("content", new Blob([buffer], { type: mimeType }), finalName);
 
@@ -465,4 +461,5 @@ module.exports = {
   downloadWorkDriveFile,
   safeError,
   safeFileName,
+  cleanWorkDriveFolderId,
 };
