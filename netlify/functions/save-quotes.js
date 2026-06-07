@@ -1,6 +1,7 @@
 const postgres = require("postgres");
+const { getConnectionString } = require("@netlify/database");
 
-const sql = postgres(process.env.NETLIFY_DB_URL, {
+const sql = postgres(getConnectionString(), {
   ssl: "require",
 });
 
