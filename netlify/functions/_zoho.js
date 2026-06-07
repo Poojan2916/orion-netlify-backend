@@ -1,11 +1,8 @@
 "use strict";
 
 // Shared Zoho helpers for Netlify Functions.
-// Region: India by default (.in). Override the *_BASE env vars only if needed.
+// Region: India by default (.in). Override env vars only if needed.
 
-
-// Cache the short-lived access token inside the warm Netlify function runtime.
-// This reduces calls to Zoho's /oauth/v2/token endpoint and prevents rate-limit errors.
 let cachedAccessToken = null;
 let cachedAccessTokenExpiresAt = 0;
 const TOKEN_SAFETY_WINDOW_MS = 60 * 1000;
@@ -16,7 +13,6 @@ function cleanRefreshToken(value) {
     .replace(/^ZOHO_REFRESH_TOKEN\s*=\s*/i, "")
     .replace(/^['"]|['"]$/g, "");
 }
-
 
 function normalizeBaseUrl(value, fallback) {
   return String(value || fallback || "")
@@ -39,12 +35,11 @@ function safeFileName(name, fallback = "Orion_Quotation.pdf", maxBase = 80) {
   if (base.length > maxBase) base = base.slice(0, maxBase);
   return base + ext.toLowerCase();
 }
+
 function cleanWorkDriveFolderId(value) {
   let v = String(value || "").trim().replace(/^['"]|['"]$/g, "");
-  // If the user pasted a full WorkDrive folder URL, extract only the folder ID.
   const folderMatch = v.match(/\/folders\/([^/?#]+)/i);
   if (folderMatch) v = folderMatch[1];
-  // Some WorkDrive URLs end with the folder/resource ID as the last path segment.
   if (/^https?:\/\//i.test(v)) {
     try {
       const u = new URL(v);
@@ -58,7 +53,6 @@ function cleanWorkDriveFolderId(value) {
   }
   return v;
 }
-
 
 const SCOPES = [
   "ZohoMail.messages.CREATE",
@@ -127,8 +121,6 @@ function apiDomain() {
 }
 
 function mailBase() {
-  // Accept both "https://mail.zoho.in" and a mistaken "https://mail.zoho.in/api".
-  // The helper removes a trailing /api so function code can safely append /api/...
   return normalizeBaseUrl(env("ZOHO_MAIL_API_BASE"), "https://mail.zoho.in");
 }
 
@@ -193,7 +185,7 @@ async function accessToken() {
     const lower = text.toLowerCase();
     const isRateLimit = lower.includes("too many requests") || lower.includes("access denied");
     const message = isRateLimit
-      ? "Zoho refresh rate limit reached. Stop testing for 30-60 minutes, then retry. The code now caches access tokens to reduce refresh requests."
+      ? "Zoho refresh rate limit reached. Stop testing for 30-60 minutes, then retry."
       : `Zoho refresh failed: ${data.error || res.status} ${data.error_description || text}`;
     const err = new Error(message);
     err.statusCode = isRateLimit ? 429 : 401;
@@ -207,7 +199,6 @@ async function accessToken() {
 }
 
 function authHeader(token) {
-  // Zoho Mail docs use Zoho-oauthtoken. WorkDrive also accepts Zoho OAuth tokens.
   return { Authorization: `Zoho-oauthtoken ${token}` };
 }
 
@@ -254,6 +245,8 @@ async function getMailAccountId() {
       a.mailboxAddress,
       a.accountDisplayName,
       a.accountName,
+      a.incomingUserName,
+      ...(Array.isArray(a.emailAddress) ? a.emailAddress.map((x) => x?.mailId || x) : []),
     ].filter(Boolean).map((x) => String(x).toLowerCase());
     return sendAs && values.includes(sendAs);
   }) || accounts[0];
@@ -262,14 +255,40 @@ async function getMailAccountId() {
   return String(id);
 }
 
+function ensureLinkInBody(body, link) {
+  const base = String(body || "Please find your quotation from Orion.").trim();
+  if (!link) return base;
+  if (base.includes(link)) return base;
+  return `${base}\n\nCustomer PDF link:\n${link}`;
+}
+
+async function sendZohoMail({ accountId, payload }) {
+  return zohoJsonFetch(`${mailBase()}/api/accounts/${accountId}/messages`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+async function sendPlainEmail({ to, subject, body, workDriveLink }) {
+  const accountId = await getMailAccountId();
+  const content = ensureLinkInBody(body, workDriveLink);
+  const payload = {
+    fromAddress: process.env.SEND_AS,
+    toAddress: to,
+    subject,
+    content,
+    mailFormat: "plaintext",
+    encoding: "UTF-8",
+  };
+  const result = await sendZohoMail({ accountId, payload });
+  return { accountId, result, mode: workDriveLink ? "workdrive-link" : "plain" };
+}
+
 async function uploadMailAttachment({ accountId, fileName, base64, mimeType = "application/pdf" }) {
   const token = await accessToken();
   const buffer = Buffer.from(base64, "base64");
   const finalName = safeFileName(fileName, "Orion_Quotation.pdf", 80);
 
-  // Zoho Mail reliably accepts attachment uploads as multipart/form-data.
-  // Do NOT set Content-Type manually; Node/undici adds the required multipart boundary.
-  // Official endpoint: /api/accounts/{accountId}/messages/attachments?uploadType=multipart&isInline=false
   const u = new URL(`${mailBase()}/api/accounts/${accountId}/messages/attachments`);
   u.searchParams.set("uploadType", "multipart");
   u.searchParams.set("isInline", "false");
@@ -306,7 +325,7 @@ async function uploadMailAttachment({ accountId, fileName, base64, mimeType = "a
   return attachment;
 }
 
-async function sendCustomerEmail({ to, subject, body, fileName, base64 }) {
+async function sendEmailWithAttachment({ to, subject, body, fileName, base64 }) {
   const accountId = await getMailAccountId();
   const attachment = await uploadMailAttachment({ accountId, fileName, base64 });
   const payload = {
@@ -315,17 +334,57 @@ async function sendCustomerEmail({ to, subject, body, fileName, base64 }) {
     subject,
     content: body || "Please find attached your quotation from Orion.",
     mailFormat: "plaintext",
+    encoding: "UTF-8",
     attachments: [{
       attachmentName: attachment.attachmentName,
       attachmentPath: attachment.attachmentPath,
       storeName: attachment.storeName,
     }],
   };
-  const result = await zohoJsonFetch(`${mailBase()}/api/accounts/${accountId}/messages`, {
-    method: "POST",
-    body: JSON.stringify(payload),
+  const result = await sendZohoMail({ accountId, payload });
+  return { accountId, result, mode: "attachment" };
+}
+
+async function sendCustomerEmail({ to, subject, body, fileName, base64, workDriveLink }) {
+  // Stable default: send the saved Zoho WorkDrive customer-PDF link.
+  // This avoids Zoho Mail attachment API instability and keeps the customer receiving the PDF.
+  const shouldTryAttachment = String(process.env.ZOHO_EMAIL_USE_ATTACHMENT || "").toLowerCase() === "true";
+
+  if (!shouldTryAttachment && workDriveLink) {
+    return sendPlainEmail({ to, subject, body, workDriveLink });
+  }
+
+  if (shouldTryAttachment && base64) {
+    try {
+      return await sendEmailWithAttachment({ to, subject, body, fileName, base64 });
+    } catch (attachmentError) {
+      if (workDriveLink) {
+        const fallbackBody = `${body || "Please find your quotation from Orion."}\n\nNote: The PDF is shared using the secure WorkDrive link below.`;
+        const result = await sendPlainEmail({ to, subject, body: fallbackBody, workDriveLink });
+        return {
+          ...result,
+          mode: "workdrive-link-fallback-after-attachment-error",
+          attachmentError: {
+            message: attachmentError.message,
+            statusCode: attachmentError.statusCode,
+            details: attachmentError.details,
+          },
+        };
+      }
+      throw attachmentError;
+    }
+  }
+
+  if (workDriveLink) {
+    return sendPlainEmail({ to, subject, body, workDriveLink });
+  }
+
+  // Last resort only. This sends a plain email without a PDF/link if caller did not save to WorkDrive.
+  return sendPlainEmail({
+    to,
+    subject,
+    body: `${body || "Please find your quotation from Orion."}\n\nNote: No WorkDrive PDF link was provided by the quotation app. Please save the quotation to WorkDrive first.`,
   });
-  return { accountId, result };
 }
 
 function workdriveUploadEndpoint() {
@@ -352,8 +411,6 @@ async function uploadWorkDriveBuffer({ folderId, fileName, buffer, mimeType = "a
   const cleanFolderId = cleanWorkDriveFolderId(folderId);
 
   const form = new FormData();
-  // Zoho WorkDrive upload expects filename, parent_id, override-name-exist, and content
-  // as multipart form fields. Putting long values in the query string can trigger F6005.
   form.append("filename", finalName);
   form.append("parent_id", cleanFolderId);
   form.append("override-name-exist", override ? "true" : "false");
@@ -453,6 +510,8 @@ module.exports = {
   getMailAccounts,
   getMailAccountId,
   uploadMailAttachment,
+  sendPlainEmail,
+  sendEmailWithAttachment,
   sendCustomerEmail,
   uploadWorkDriveBase64,
   uploadWorkDriveBuffer,
