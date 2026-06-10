@@ -24,30 +24,26 @@ exports.handler = async (event) => {
     const body = JSON.parse(event.body || "{}");
     const to = cleanEmail(body.to);
     const subject = firstNonEmpty(body.subject, "Quotation from Orion");
-    const messageBody = firstNonEmpty(body.body, "Please find your quotation from Orion.");
-    const workDriveLink = firstNonEmpty(
-      body.externalWorkDriveLink,
-      body.externalDriveLink,
-      body.workDriveLink,
-      body.pdfLink,
-      body.link
-    );
+    const messageBody = firstNonEmpty(body.body, "Please find attached your quotation from Orion.");
+    const fileName = firstNonEmpty(body.fileName, "Orion_Quotation.pdf");
+    const base64 = firstNonEmpty(body.externalPdfBase64, body.pdfBase64, body.base64);
 
     if (!to) {
       return z.json(400, { error: "Recipient email is required." });
     }
 
-    // Stable production behavior:
-    // - If WorkDrive link is present, email the link.
-    // - Attachment sending is disabled by default because Zoho Mail attachment API was returning 500/415.
-    // - To explicitly retry attachment sending later, set ZOHO_EMAIL_USE_ATTACHMENT=true.
+    if (!base64) {
+      return z.json(400, {
+        error: "Customer PDF is required. The frontend must send externalPdfBase64 to /send-email.",
+      });
+    }
+
     const result = await z.sendCustomerEmail({
       to,
       subject,
       body: messageBody,
-      fileName: firstNonEmpty(body.fileName, "Orion_Quotation.pdf"),
-      base64: body.externalPdfBase64 || body.pdfBase64 || "",
-      workDriveLink,
+      fileName,
+      base64,
     });
 
     return z.json(200, {
@@ -55,13 +51,15 @@ exports.handler = async (event) => {
       from: process.env.SEND_AS,
       to,
       accountId: result.accountId,
-      mode: result.mode,
-      workDriveLink: workDriveLink || null,
-      attachmentError: result.attachmentError || undefined,
-      zohoResponse: result.result,
+      mode: "attachment",
+      fileName,
       sentAt: new Date().toISOString(),
+      zoho: result.result,
     });
-  } catch (e) {
-    return z.json(e.statusCode || 500, z.safeError(e));
+  } catch (err) {
+    return z.json(err.statusCode || 500, {
+      error: err.message || "Send email failed",
+      details: err.details || null,
+    });
   }
 };

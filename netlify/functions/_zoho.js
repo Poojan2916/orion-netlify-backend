@@ -345,45 +345,21 @@ async function sendEmailWithAttachment({ to, subject, body, fileName, base64 }) 
   return { accountId, result, mode: "attachment" };
 }
 
-async function sendCustomerEmail({ to, subject, body, fileName, base64, workDriveLink }) {
-  // Stable default: send the saved Zoho WorkDrive customer-PDF link.
-  // This avoids Zoho Mail attachment API instability and keeps the customer receiving the PDF.
-  const shouldTryAttachment = String(process.env.ZOHO_EMAIL_USE_ATTACHMENT || "").toLowerCase() === "true";
-
-  if (!shouldTryAttachment && workDriveLink) {
-    return sendPlainEmail({ to, subject, body, workDriveLink });
+async function sendCustomerEmail({ to, subject, body, fileName, base64 }) {
+  // Direct attachment mode:
+  // The quotation PDF is generated in the frontend and sent here as base64.
+  // WorkDrive saving is NOT required before sending email.
+  if (!base64) {
+    const err = new Error("Customer PDF base64 is required for direct email attachment.");
+    err.statusCode = 400;
+    throw err;
   }
-
-  if (shouldTryAttachment && base64) {
-    try {
-      return await sendEmailWithAttachment({ to, subject, body, fileName, base64 });
-    } catch (attachmentError) {
-      if (workDriveLink) {
-        const fallbackBody = `${body || "Please find your quotation from Orion."}\n\nNote: The PDF is shared using the secure WorkDrive link below.`;
-        const result = await sendPlainEmail({ to, subject, body: fallbackBody, workDriveLink });
-        return {
-          ...result,
-          mode: "workdrive-link-fallback-after-attachment-error",
-          attachmentError: {
-            message: attachmentError.message,
-            statusCode: attachmentError.statusCode,
-            details: attachmentError.details,
-          },
-        };
-      }
-      throw attachmentError;
-    }
-  }
-
-  if (workDriveLink) {
-    return sendPlainEmail({ to, subject, body, workDriveLink });
-  }
-
-  // Last resort only. This sends a plain email without a PDF/link if caller did not save to WorkDrive.
-  return sendPlainEmail({
+  return sendEmailWithAttachment({
     to,
     subject,
-    body: `${body || "Please find your quotation from Orion."}\n\nNote: No WorkDrive PDF link was provided by the quotation app. Please save the quotation to WorkDrive first.`,
+    body: body || "Please find attached your quotation from Orion.",
+    fileName: fileName || "Orion_Quotation.pdf",
+    base64,
   });
 }
 
