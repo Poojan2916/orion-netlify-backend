@@ -1,0 +1,65 @@
+const postgres = require("postgres");
+
+const connectionString =
+  process.env.DATABASE_URL ||
+  process.env.DB_URL ||
+  process.env.NETLIFY_DB_URL ||
+  process.env.POSTGRES_URL;
+
+if (!connectionString) {
+  throw new Error("Missing DATABASE_URL for Netlify Database connection. Add the Read and write connection string as DATABASE_URL in Netlify environment variables.");
+}
+
+const sql = postgres(connectionString, { ssl: "require" });
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || "*",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+};
+
+exports.handler = async (event) => {
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers: corsHeaders, body: "" };
+  }
+
+  if (event.httpMethod !== "GET") {
+    return {
+      statusCode: 405,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ error: "Method not allowed" }),
+    };
+  }
+
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS quotation_state (
+        id TEXT PRIMARY KEY,
+        data JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    const rows = await sql`
+      SELECT data, updated_at
+      FROM quotation_state
+      WHERE id = 'settings'
+      LIMIT 1
+    `;
+
+    return {
+      statusCode: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        settings: rows.length ? rows[0].data : null,
+        updatedAt: rows.length ? rows[0].updated_at : null,
+      }),
+    };
+  } catch (error) {
+    return {
+      statusCode: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ error: error.message }),
+    };
+  }
+};
